@@ -11,7 +11,7 @@ backend host_{{ $instancenum }}_{{ $appnum }} { # {{ $app }}: {{ index $hostport
     .host = "{{ index $hostport 0 }}";
     .port = "{{ index $hostport 1 }}";
     .probe = {
-        .url = "/check/status.txt";
+        .url = "/";
         .interval = 5s;
         .timeout = 1s;
         .window = 5;
