@@ -1,30 +1,34 @@
 vcl 4.0;
 import directors;
+import std;
 
 # backends
 backend default { # default backend is never actually used -- see vcl_recv
     .host = "localhost";
     .port = "8080";
 }
-{{ range $appnum, $app := lsdir "/services" }}{{ range $instancenum, $instance := ls (printf "/services/%s" $app) }}{{ if eq (index (split $instance ":") 2) "80" }}{{ $hostport := split (getv (printf "/services/%s/%s" $app $instance)) ":" }}{{ if ne (index $hostport 1) "80" }}
+{{ range $appnum, $app := lsdir "/services" }}{{ range $instancenum, $instance := ls (printf "/services/%s" $app) }}{{ $instance_split := split $instance ":" }}{{ if gt (len $instance_split) 1 }}{{ $hostport := split (getv (printf "/services/%s/%s" $app $instance)) ":" }}{{ if eq (index (split (index $hostport 1) "") 0) "8" }}
 backend host_{{ $instancenum }}_{{ $appnum }} { # {{ $app }}: {{ index $hostport 0 }}:{{ index $hostport 1 }} -> {{ $instance }}
-    .host = "{{ index $hostport 0 }}";
+    .host = "{{ index $instance_split 0 }}";
     .port = "{{ index $hostport 1 }}";
+    .connect_timeout = 10s;
+    .first_byte_timeout = 300s;
+    {{ if exists (printf "/probes/%s/url" $app ) }}
     .probe = {
-        .url = "/";
-        .interval = 5s;
-        .timeout = 1s;
+        .url = {{ getv (printf "/probes/%s/url" $app) }};
+        .interval = 10s;
+        .timeout = 3s;
         .window = 5;
         .threshold = 3;
     }
+    {{ end }}
 }{{ end }}{{ end }}{{ end }}{{ end }}
-
 
 # setup directors
 
 sub vcl_init {
-{{ range $appnum, $app := lsdir "/services" }}{{ range $instancenum, $instance := ls (printf "/services/%s" $app) }}{{ if eq (index (split $instance ":") 2) "80" }}{{ $hostport := split (getv (printf "/services/%s/%s" $app $instance)) ":" }}{{ if ne (index $hostport 1) "80" }}{{ if eq $instancenum 0 }}
-    new director_{{ $appnum }} = directors.round_robin(); # {{ $app }}{{ end }}
+{{ range $appnum, $app := lsdir "/services" }}
+    new director_{{ $appnum }} = directors.round_robin(); # {{ $app }}{{ range $instancenum, $instance := ls (printf "/services/%s" $app) }}{{ $instance_split := split $instance ":" }}{{ if gt (len $instance_split) 1 }}{{ $hostport := split (getv (printf "/services/%s/%s" $app $instance)) ":" }}{{ if eq (index (split (index $hostport 1) "") 0) "8" }}
     director_{{ $appnum }}.add_backend(host_{{ $instancenum }}_{{ $appnum }}); # {{ $instance }}
 {{ end }}{{ end }}{{ end }}{{ end }}
 }
@@ -33,23 +37,44 @@ sub vcl_init {
 
 sub vcl_recv {
     set req.http.complete_url = "http://" + req.http.host + req.url;
+    set req.http.complete_url_tls = "https://" + req.http.host + req.url;
     set req.backend_hint = default;
+    set req.http.grace = "none";
+  
+    # Remove has_js and CloudFlare/Google Analytics __* cookies.
+    set req.http.Cookie = regsuball(req.http.Cookie, "(^|;\s*)(_[_a-z]+|has_js)=[^;]*", "");
+    # Remove a ";" prefix, if present.
+    set req.http.Cookie = regsub(req.http.Cookie, "^;\s*", ""); 
+    set req.http.Host = regsub(req.http.Host, ":[0-9]+", "");
 
-    if (false) {} # dummy to make the rest always say "else if"
+    # block spammers and broken user-agents
+    if (req.http.user-agent ~ "CITRIX") {
+       return (synth(403, "Bots be banned"));
+    }
+
+    if (false) { }
 {{ range $app := ls "/apps" }}{{ range jsonArray (getv (printf "/apps/%s" $app)) }}{{ if .from }}
+    # $app
     else if (req.http.complete_url ~ "{{ .from }}") { # from {{ $app }}{{ if .to }}{{ if .internal }}
-        set req.http.complete_url = regsub(req.http.complete_url, "{{ .from }}", "{{ .to }}");
-        set req.http.host = regsub(req.http.complete_url, "^https?://([^/]+).*", "\1");
-        set req.url = regsub(req.http.complete_url, "^https?://[^/]+(/.*)", "\1");{{ else }}
+        set req.http.complete_url = regsub(req.http.complete_url_tls, "{{ .from }}", "{{ .to }}");
+        set req.http.host = regsub(req.http.complete_url_tls, "^https?://([^/]+).*", "\1");
+        set req.url = regsub(req.http.complete_url_tls, "^https?://[^/]+(/.*)", "\1");{{ else }}
         return (synth(301, regsub(req.http.complete_url, "{{ .from }}", "{{ .to }}")));{{ end }}{{ else if .app }}{{ range $appnum, $appname := lsdir "/services" }}{{ if eq .app $appname }}
         set req.backend_hint = director_{{ $appnum }}.backend(); # {{ $appname }}{{ end }}{{ end }}{{ else }}{{ range $appnum, $appname := lsdir "/services" }}{{ if eq $app $appname }}
         set req.backend_hint = director_{{ $appnum }}.backend(); # {{ $appname }}{{ end }}{{ end }}{{ end }}
     }
 {{ end }}{{ end }}{{ end }}
-    unset req.http.cmplete_url;
+    unset req.http.complete_url;
 
     if (req.backend_hint == default) {
         return (synth(404, "Not found"));
+    }
+}
+
+sub vcl_backend_response {
+    if (beresp.ttl < 120s) {
+       set beresp.ttl = 120s;
+       unset beresp.http.Cache-Control;
     }
 }
 
@@ -57,6 +82,9 @@ sub vcl_synth {
     if (resp.status == 301) {
         set resp.http.Location = resp.reason;
         set resp.reason = "Moved Permanently";
+    } else if (resp.status == 302) {
+        set resp.http.Location = resp.reason;
+        set resp.reason = "Moved Temporarily";
     }
 
     set resp.http.Content-Type = "text/html; charset=utf-8";
@@ -72,4 +100,8 @@ sub vcl_synth {
     <p>"} + resp.reason + {".</p>
 </body></html>"} );
     return (deliver);
+}
+
+sub vcl_hash {
+  hash_data(req.http.X-Forwarded-Proto);
 }
