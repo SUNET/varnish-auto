@@ -4,6 +4,7 @@ MAINTAINER Kevin Eye <kevineye@gmail.com>
 RUN rpm -Uvh http://download.fedoraproject.org/pub/epel/6/i386/epel-release-6-8.noarch.rpm \
  && rpm --nosignature -i https://repo.varnish-cache.org/redhat/varnish-4.0.el6.rpm \
  && yum -y update \
+ && yum -y upgrade \
  && yum -y install tar varnish python-setuptools \
  && yum clean all
 

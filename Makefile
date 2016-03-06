@@ -1,9 +1,12 @@
+VERSION=latest
+NAME=varnish-auto
+
 all: build push
-update:
-	docker build -t varnish-auto .
-	docker tag -f varnish-auto docker.sunet.se/varnish-auto
 build:
-	docker build --no-cache=true -t varnish-auto .
-	docker tag -f varnish-auto docker.sunet.se/varnish-auto
+	docker build --no-cache=true -t $(NAME):$(VERSION) .
+	docker tag -f $(NAME):$(VERSION) docker.sunet.se/$(NAME):$(VERSION)
+update:
+	docker build -t $(NAME):$(VERSION) .
+	docker tag -f $(NAME):$(VERSION) docker.sunet.se/$(NAME):$(VERSION)
 push:
-	docker push docker.sunet.se/varnish-auto
+	docker push docker.sunet.se/$(NAME):$(VERSION)
